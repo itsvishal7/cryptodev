@@ -1,5 +1,6 @@
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/kernel.h>
 
 #define PCI_CryptoCard_DRIVER "cryptocard_mod"
 #define PCI_CryptoCard_VENDOR 0x010C
@@ -26,7 +27,8 @@ static void cryptocard_remove(struct pci_dev *dev)
  * PCI_ANY_ID.
  */
 static struct pci_device_id cryptocard_ids[] = {
-	{ PCI_DEVICE(PCI_CryptoCard_VENDOR, PCI_CryptoCard_DEVICE) }
+	{ PCI_DEVICE(PCI_CryptoCard_VENDOR, PCI_CryptoCard_DEVICE) },
+	{ 0, },
 };
 
 static struct pci_driver cryptocard_mod = {
