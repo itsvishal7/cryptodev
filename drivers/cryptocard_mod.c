@@ -3,18 +3,18 @@
 #include <linux/kernel.h>
 
 #define PCI_CryptoCard_DRIVER "cryptocard_mod"
-#define PCI_CryptoCard_VENDOR 0x010C
-#define PCI_CryptoCard_DEVICE 0x5730
+#define PCI_CryptoCard_VENDOR 0x1234
+#define PCI_CryptoCard_DEVICE 0xdeba
 
 static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
-	printk(KERN_INFO "cryptocard_probe: probe method called");
+	printk(KERN_INFO "cryptocard_probe: probe method called\n");
 	return 0;
 }
 
 static void cryptocard_remove(struct pci_dev *dev)
 {
-	printk(KERN_INFO "cryptocard_remove: remove method called");
+	printk(KERN_INFO "cryptocard_remove: remove method called\n");
 }
 
 /**
