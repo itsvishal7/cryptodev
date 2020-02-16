@@ -1,6 +1,5 @@
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/kernel.h>
 
 #define PCI_CryptoCard_DRIVER "cryptocard_mod"
 #define PCI_CryptoCard_VENDOR 0x1234
@@ -8,13 +7,29 @@
 
 static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
-	printk(KERN_INFO "cryptocard_probe: probe method called\n");
+	pr_alert("cryptocard_probe: probe method called!!!\n");
+	
+	if (pci_enable_device(dev))
+        	goto out_err;
+	pr_alert("cryptocard_probe: enabled device!!!\n");
+	if (pci_request_regions(dev, PCI_CryptoCard_DRIVER))
+		goto out_disable;
+	pr_alert("cryptocard_probe: requested regions!!!\n");
+	
 	return 0;
+out_disable:
+	pr_alert("cryptocard_probe: out_disable: pci_request_regions failed!!!\n");
+	pci_disable_device(dev);
+out_err:
+	pr_alert("cryptocard_probe: out_err: pci_enable_device failed!!!\n");
+	return -ENODEV;
 }
 
 static void cryptocard_remove(struct pci_dev *dev)
 {
-	printk(KERN_INFO "cryptocard_remove: remove method called\n");
+	pr_alert("cryptocard_remove: remove method called!!!\n");
+	pci_release_regions(dev);
+	pci_disable_device(dev);
 }
 
 /**
