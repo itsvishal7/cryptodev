@@ -1,9 +1,40 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 
+#define ui unsigned int
+#define ul unsigned long
+
 #define PCI_CryptoCard_DRIVER "cryptocard_mod"
 #define PCI_CryptoCard_VENDOR 0x1234
 #define PCI_CryptoCard_DEVICE 0xdeba
+
+void __iomem *start;
+ul size;
+/*
+struct config_mem {
+	void __iomem *id;
+	void __iomem *live;
+	void __iomem *keya;
+	void __iomem *keyb;
+	// mmio //
+	void __iomem *len_msg;
+	//// registers //
+	void __iomem *status;
+	void __iomem *interrupt_status;
+	void __iomem *interrupt_raise;
+	void __iomem *interrupt_ack;
+	//// registers end //
+	void __iomem *data_addr;
+	//// mmio end//
+	// dma //
+	void __iomem *addr_op;
+	void __iomem *dlen_msg;
+	//// registers //
+	void __iomem *cmd;
+	//// registers end //
+	// dma end //
+}configspace;
+*/
 
 static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
@@ -15,8 +46,34 @@ static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	if (pci_request_regions(dev, PCI_CryptoCard_DRIVER))
 		goto out_disable;
 	pr_alert("cryptocard_probe: requested regions!!!\n");
+
+	start = pci_ioremap_bar(dev, 0);
+	if (!start)
+		goto out_unrequest;
+	size = pci_resource_len(dev, 0);	
 	
+	pr_alert("cryptocard_probe: config space start: %lx and size: %lx\n", (ul)start, size);
+	if (ioread32(start) != 0x010C5730) {
+		pr_alert("cryptocard_probe: id match failed!!!\n"); 
+		goto out_iounmap;
+	}
+	pr_alert("cryptocard_probe: id matched!!!\n");
+
+	iowrite32(0x0fffffff, start + 4);
+	if (ioread32(start+4) & 0x0fffffff) {
+		pr_alert("cryptocard_probe: liveliness check failed!!!\n");                              
+                goto out_iounmap;
+	}
+	pr_alert("cryptocard_probe: liveliness check passed!!!\n");
+	 
 	return 0;
+
+out_iounmap:
+	pr_alert("cryptocard_probe: out_iounmap: something failed after iomapping !!!\n");
+	iounmap(start);
+out_unrequest:
+	pr_alert("cryptocard_probe: out_unrequest: pci_ioremap_bar failed!!!\n");
+	pci_release_regions(dev);
 out_disable:
 	pr_alert("cryptocard_probe: out_disable: pci_request_regions failed!!!\n");
 	pci_disable_device(dev);
@@ -28,6 +85,7 @@ out_err:
 static void cryptocard_remove(struct pci_dev *dev)
 {
 	pr_alert("cryptocard_remove: remove method called!!!\n");
+	iounmap(start);
 	pci_release_regions(dev);
 	pci_disable_device(dev);
 }
