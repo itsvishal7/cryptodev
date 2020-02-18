@@ -1,0 +1,10 @@
+#!/bin/sh
+module="cryptocard_mod"
+device="cryptocard_mod"
+
+sudo rmmod $module || exit 1
+sudo dmesg -C
+
+sudo rm -f /dev/$device
+
+make clean
