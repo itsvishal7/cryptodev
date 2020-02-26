@@ -2,9 +2,9 @@
 module="cryptocard_mod"
 device="cryptocard_mod"
 
+make clean
+
 sudo rmmod $module || exit 1
 sudo dmesg -C
 
 sudo rm -f /dev/$device
-
-make clean

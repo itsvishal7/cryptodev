@@ -1,4 +1,5 @@
 # Write your acknowledgement here..
 
-Saurabh: Asked him and configuration space of pci device, *bar 0* in our case
+Saurabh: Asked him and configuration space of pci device, *bar 0* in our case, two process with same handle, what are you excepting 
 Vishal Gupta: Asked him, why could one need to implement array cdev in pci driver
+
