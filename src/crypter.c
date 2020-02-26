@@ -1,16 +1,32 @@
-#include<crypter.h>
+#include <crypter.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <stdio.h>
+
+#define SET_KEY___ _IOW(248,101,uint32_t*)
+#define SET_CONFIG _IOW(248,102,uint8_t*)
+#define SET_ENCRYP _IOW(248,103,uint8_t*)
 
 /*Function template to create handle for the CryptoCard device.
 On success it returns the device handle as an integer*/
 DEV_HANDLE create_handle()
 {
-  return ERROR;
+	DEV_HANDLE cdev = open("/dev/cryptocard_mod",O_RDWR);
+	if (cdev < 0)
+		return ERROR;
+	return cdev;
 }
 
 /*Function template to close device handle.
 Takes an already opened device handle as an arguments*/
 void close_handle(DEV_HANDLE cdev)
 {
+	if (close(cdev)) {
+		printf("close_handle: error while closing\n");
+		return;
+	}
+	printf("close_handle: successfully closed\n");
 }
 
 /*Function template to encrypt a message using MMIO/DMA/Memory-mapped.
@@ -22,6 +38,11 @@ Takes four arguments
 */
 int encrypt(DEV_HANDLE cdev, ADDR_PTR addr, uint64_t length, uint8_t isMapped)
 {
+	uint8_t value;
+	value = 50;
+	if (ioctl(cdev, SET_ENCRYP, &value))
+                return ERROR;
+	write(cdev, addr, length);
   return ERROR;
 }
 
@@ -34,6 +55,11 @@ Takes four arguments
 */
 int decrypt(DEV_HANDLE cdev, ADDR_PTR addr, uint64_t length, uint8_t isMapped)
 {
+	uint8_t value;
+        value = 60;
+        if (ioctl(cdev, SET_ENCRYP, &value))
+                return ERROR;
+	write(cdev, addr, length);
   return ERROR;
 }
 
@@ -45,7 +71,12 @@ Takes three arguments
 Return 0 in case of key is set successfully*/
 int set_key(DEV_HANDLE cdev, KEY_COMP a, KEY_COMP b)
 {
-  return ERROR;
+	uint32_t key = a;
+	key = key<<8;
+	key = key | b;
+	if (ioctl(cdev, SET_KEY___, &key))
+		return ERROR;
+	return 0;
 }
 
 /*Function template to set configuration of the device to operate.
@@ -55,8 +86,19 @@ Takes three arguments
   value: SET/UNSET to enable or disable configuration as described in type
 Return 0 in case of key is set successfully*/
 int set_config(DEV_HANDLE cdev, config_t type, uint8_t value)
-{
-  return ERROR;
+{	
+	if (type == DMA && value == SET) {
+		value = 40;
+	}else if (type == DMA && value == UNSET) {
+		value = 30;
+	}else if (type ==  INTERRUPT && value == SET) {
+		value = 10;
+	}else {
+		value = 20;
+	}
+	if (ioctl(cdev, SET_CONFIG, &value))
+		return ERROR;
+  return 0;
 }
 
 /*Function template to device input/output memory into user space.
