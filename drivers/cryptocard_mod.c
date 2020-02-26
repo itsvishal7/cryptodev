@@ -87,6 +87,28 @@ static bool is_not_live(void __iomem *live, u32 value)
 	return false;
 }
 
+static irqreturn_t pci_irq_handle(int irq, void *devid) 
+{
+	u32 status;
+	struct config_mem *space;
+	pr_alert("pci_irq_handle: called\n");
+	if (!mycryptodev.configspace) {
+		return -EBUSY;
+	}
+	space = mycryptodev.configspace;
+	status = ioread32(space->start+space->interrupt_status);
+	if (status == 0x001) {
+		pr_alert("pci_irq_handle: MMIO\n");
+	} else if (status == 0x100) {
+		pr_alert("pci_irq_handle: DMA\n");
+	}else {
+		iowrite32(status,  space->start+space->interrupt_ack);
+		return -EINVAL;
+	}
+	iowrite32(status,  space->start+space->interrupt_ack);
+	return IRQ_HANDLED;
+}
+
 static long pci_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {	
 	struct job *myjob;
@@ -169,6 +191,20 @@ static ssize_t pci_write(struct file *file, const char __user *ptr, size_t len, 
 		pr_alert("pci_write: MMIO operation!!!\n");
 		if (myjob->isI) {
 			pr_alert("pci_write: With Interrupt!!!\n");
+			if (myjob->isE) {
+                                pr_alert("pci_write: Encrypt!!!\n");
+                                iowrite32(0x80 | 0x00, space->start+space->status);
+                        } else {
+                                pr_alert("pci_write: Decrypt!!!\n");
+                                iowrite32(0x80 | 0x02, space->start+space->status);
+                        }
+			iowrite32(myjob->keyab, space->start+space->keys);
+                        iowrite32(myjob->len, space->start+space->len_msg);
+			memcpy_toio(space->start+space->r1.start, (void *) myjob->msg, myjob->len);
+			pr_alert("pci_write: Driver should put data address register and go to sleep!!\n");
+		/*tmp*/ pr_alert("pci_write: status: %x\n", ioread32(space->start+space->status));
+                /*tmp*/ pr_alert("pci_write: len_msg: %x\n", ioread32(space->start+space->len_msg));
+                        iowrite32(space->r1.start, space->start+space->data_addr);
 		} else {
 			pr_alert("pci_write: Without Interrupt!!!\n");
 			if (myjob->isE) {
@@ -303,9 +339,15 @@ static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	}
 	pr_alert("cryptocard_probe: liveliness check passed!!!\n");
 
+	if (request_irq(dev->irq, pci_irq_handle, IRQF_SHARED, PCI_CryptoCard_DRIVER, dev)) {
+		pr_alert("cryptocard_probe: request irq failed!!!\n");
+		goto out_iounmap;
+	}
+	pr_alert("cryptocard_probe: irq#%u\n", dev->irq);
+
 	if (alloc_chrdev_region(&devno, 0, MAXDEVICE, PCI_CryptoCard_DRIVER)) {
 		pr_alert("cryptocard_probe: char device allocation failed!!!\n");
-                goto out_iounmap;
+                goto out_irqfree;
 	}
         pr_alert("cryptocard_probe: char device region allocated, major number: %d \n", MAJOR(devno));
 	
@@ -322,6 +364,9 @@ static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 out_chrdev_unreg_region:
 	pr_alert("cryptocard_probe: out_chrdev_unreg_region: cdev_add failed!!!\n");
 	unregister_chrdev_region(devno, MAXDEVICE);
+out_irqfree:
+	pr_alert("cryptocard_probe: out_irqfree: something failed after request irq!!!\n");
+	free_irq(dev->irq, dev);
 out_iounmap:
 	pr_alert("cryptocard_probe: out_iounmap: something failed after iomapping !!!\n");
 	iounmap(space->start);
@@ -343,6 +388,7 @@ static void cryptocard_remove(struct pci_dev *dev)
 	pr_alert("cryptocard_remove: remove method called!!!\n");
 	cdev_del(mycryptodev.cdev);
         unregister_chrdev_region(devno, MAXDEVICE);
+	free_irq(dev->irq, dev);
 	iounmap(mycryptodev.configspace->start);
 	pci_release_regions(dev);
 	pci_disable_device(dev);
