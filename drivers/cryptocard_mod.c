@@ -79,11 +79,113 @@ struct cryptodev_data {
 };
 
 
+/** Device specfic data */
 static dev_t devno;
 struct cryptodev_data mycryptodev;
 
+/** setup functions */
 static bool is_not_live(void __iomem *live, u32 value);
 static void setup_configspace(struct config_mem *configspace, ul size);
+
+/** char dev file operations function */ 
+static irqreturn_t pci_irq_handle(int irq, void *devid);
+static long pci_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+static ssize_t pci_write(struct file *file, const char __user *ptr, size_t len, loff_t *offset);
+static int pci_open(struct inode *inode, struct file *file);
+static int pci_release (struct inode *inode, struct file *file);
+
+const struct file_operations fops = {
+	.owner          = THIS_MODULE,
+	.open           = pci_open,
+	.unlocked_ioctl = pci_unlocked_ioctl,
+	.write          = pci_write,
+	.release        = pci_release 
+};
+
+static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
+{	
+	struct config_mem *space;
+	struct cdev *cdev;
+	pr_alert("cryptocard_probe: probe method called!!!\n");
+	
+	space = kzalloc(sizeof(struct config_mem), GFP_KERNEL);
+	if (!space)
+		return -ENOMEM;	
+	cdev = kzalloc(sizeof(struct cdev), GFP_KERNEL);
+        if (!cdev) {
+		kfree(space);
+                return -ENOMEM;
+	}
+
+	if (pci_enable_device(dev))
+        	goto out_err;
+	pr_alert("cryptocard_probe: enabled device!!!\n");
+	if (pci_request_regions(dev, PCI_CryptoCard_DRIVER))
+		goto out_disable;
+	pr_alert("cryptocard_probe: requested regions!!!\n");
+	space->start = pci_ioremap_bar(dev, 0);
+	if (!space->start)
+                goto out_unrequest;
+	setup_configspace(space, pci_resource_len(dev, 0));
+	pr_alert("cryptocard_probe: configspace start: %lx, size: %lx\n", (ul)space->start, space->size);
+	if (ioread32(space->id) != PCI_CryptoCard_IDFIER) {
+		pr_alert("cryptocard_probe: id match failed!!!\n"); 
+		goto out_iounmap;
+	}
+	pr_alert("cryptocard_probe: id matched!!!\n");
+
+	if (is_not_live(space->live, 0x0fffffff)) {
+		pr_alert("cryptocard_probe: liveliness check failed!!!\n");                              
+                goto out_iounmap;
+	}
+	pr_alert("cryptocard_probe: liveliness check passed!!!\n");
+
+	if (request_irq(dev->irq, pci_irq_handle, IRQF_SHARED, PCI_CryptoCard_DRIVER, dev)) {
+		pr_alert("cryptocard_probe: request irq failed!!!\n");
+		goto out_iounmap;
+	}
+	pr_alert("cryptocard_probe: requested irq at: %u\n", dev->irq);
+
+	if (alloc_chrdev_region(&devno, 0, MAXDEVICE, PCI_CryptoCard_DRIVER)) {
+		pr_alert("cryptocard_probe: char device allocation failed!!!\n");
+                goto out_irqfree;
+	}
+        pr_alert("cryptocard_probe: char device region allocated, major number: %d \n", MAJOR(devno));
+	
+	mycryptodev.cdev = cdev;
+        mycryptodev.configspace = space;	
+	
+	init_waitqueue_head(&mycryptodev.wq);
+	sema_init(&mycryptodev.wsem, 1);
+
+        cdev_init(cdev, &fops);
+        if (cdev_add(cdev, devno, 1))
+		goto out_chrdev_unreg_region;
+	pr_alert("cryptocard_probe: char device added!!!\n");
+
+	return 0;
+
+out_chrdev_unreg_region:
+	pr_alert("cryptocard_probe: out_chrdev_unreg_region: cdev_add failed!!!\n");
+	unregister_chrdev_region(devno, MAXDEVICE);
+out_irqfree:
+	pr_alert("cryptocard_probe: out_irqfree: something failed after request irq!!!\n");
+	free_irq(dev->irq, dev);
+out_iounmap:
+	pr_alert("cryptocard_probe: out_iounmap: something failed after iomapping !!!\n");
+	iounmap(space->start);
+out_unrequest:
+	pr_alert("cryptocard_probe: out_unrequest: pci_ioremap_bar failed!!!\n");
+	pci_release_regions(dev);
+out_disable:
+	pr_alert("cryptocard_probe: out_disable: pci_request_regions failed!!!\n");
+	pci_disable_device(dev);
+out_err:
+	pr_alert("cryptocard_probe: out_err: char device alloc failed!!!\n");
+	kfree(cdev);
+	kfree(space);
+	return -ENODEV;
+}
 
 static irqreturn_t pci_irq_handle(int irq, void *devid) 
 {
@@ -284,99 +386,6 @@ static int pci_release (struct inode *inode, struct file *file)
 	file->private_data = NULL;
 	pr_info("pci_release: success!!!\n");
         return 0;
-}
-
-const struct file_operations fops = {
-	.owner          = THIS_MODULE,
-	.open           = pci_open,
-	.unlocked_ioctl = pci_unlocked_ioctl,
-	.write          = pci_write,
-	.release        = pci_release 
-};
-
-static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
-{	
-	struct config_mem *space;
-	struct cdev *cdev;
-	pr_alert("cryptocard_probe: probe method called!!!\n");
-	
-	space = kzalloc(sizeof(struct config_mem), GFP_KERNEL);
-	if (!space)
-		return -ENOMEM;	
-	cdev = kzalloc(sizeof(struct cdev), GFP_KERNEL);
-        if (!cdev) {
-		kfree(space);
-                return -ENOMEM;
-	}
-
-	if (pci_enable_device(dev))
-        	goto out_err;
-	pr_alert("cryptocard_probe: enabled device!!!\n");
-	if (pci_request_regions(dev, PCI_CryptoCard_DRIVER))
-		goto out_disable;
-	pr_alert("cryptocard_probe: requested regions!!!\n");
-	space->start = pci_ioremap_bar(dev, 0);
-	if (!space->start)
-                goto out_unrequest;
-	setup_configspace(space, pci_resource_len(dev, 0));
-	pr_alert("cryptocard_probe: configspace start: %lx, size: %lx\n", (ul)space->start, space->size);
-	if (ioread32(space->id) != PCI_CryptoCard_IDFIER) {
-		pr_alert("cryptocard_probe: id match failed!!!\n"); 
-		goto out_iounmap;
-	}
-	pr_alert("cryptocard_probe: id matched!!!\n");
-
-	if (is_not_live(space->live, 0x0fffffff)) {
-		pr_alert("cryptocard_probe: liveliness check failed!!!\n");                              
-                goto out_iounmap;
-	}
-	pr_alert("cryptocard_probe: liveliness check passed!!!\n");
-
-	if (request_irq(dev->irq, pci_irq_handle, IRQF_SHARED, PCI_CryptoCard_DRIVER, dev)) {
-		pr_alert("cryptocard_probe: request irq failed!!!\n");
-		goto out_iounmap;
-	}
-	pr_alert("cryptocard_probe: requested irq at: %u\n", dev->irq);
-
-	if (alloc_chrdev_region(&devno, 0, MAXDEVICE, PCI_CryptoCard_DRIVER)) {
-		pr_alert("cryptocard_probe: char device allocation failed!!!\n");
-                goto out_irqfree;
-	}
-        pr_alert("cryptocard_probe: char device region allocated, major number: %d \n", MAJOR(devno));
-	
-	mycryptodev.cdev = cdev;
-        mycryptodev.configspace = space;	
-	
-	init_waitqueue_head(&mycryptodev.wq);
-	sema_init(&mycryptodev.wsem, 1);
-
-        cdev_init(cdev, &fops);
-        if (cdev_add(cdev, devno, 1))
-		goto out_chrdev_unreg_region;
-	pr_alert("cryptocard_probe: char device added!!!\n");
-
-	return 0;
-
-out_chrdev_unreg_region:
-	pr_alert("cryptocard_probe: out_chrdev_unreg_region: cdev_add failed!!!\n");
-	unregister_chrdev_region(devno, MAXDEVICE);
-out_irqfree:
-	pr_alert("cryptocard_probe: out_irqfree: something failed after request irq!!!\n");
-	free_irq(dev->irq, dev);
-out_iounmap:
-	pr_alert("cryptocard_probe: out_iounmap: something failed after iomapping !!!\n");
-	iounmap(space->start);
-out_unrequest:
-	pr_alert("cryptocard_probe: out_unrequest: pci_ioremap_bar failed!!!\n");
-	pci_release_regions(dev);
-out_disable:
-	pr_alert("cryptocard_probe: out_disable: pci_request_regions failed!!!\n");
-	pci_disable_device(dev);
-out_err:
-	pr_alert("cryptocard_probe: out_err: char device alloc failed!!!\n");
-	kfree(cdev);
-	kfree(space);
-	return -ENODEV;
 }
 
 static void cryptocard_remove(struct pci_dev *dev)
