@@ -4,6 +4,7 @@
 #include <linux/uaccess.h>
 #include <linux/interrupt.h>
 #include <linux/ioctl.h>
+#include <linux/wait.h>
 
 #define INTERRUPT 10
 #define NOINTERRUPT 20
@@ -24,6 +25,7 @@
 #define PCI_CryptoCard_DRIVER "cryptocard_mod"
 #define PCI_CryptoCard_VENDOR 0x1234
 #define PCI_CryptoCard_DEVICE 0xdeba
+#define PCI_CryptoCard_IDFIER 0x010C5730
 
 struct job {
 	bool isE;          // isEncrypt or Decrypt
@@ -35,34 +37,34 @@ struct job {
 };
 
 struct mem_region {
-	u32 start;
-	u32 end;
+	void __iomem *start;
+	void __iomem *end;
 };
 
 struct config_mem {
 	void __iomem *start;
-	u8 id;                 /* read only */
-	u8 live;
-	u8 keys;               /* write only */
+	void __iomem *id;                 /* read only */
+	void __iomem *live;
+	void __iomem *keys;               /* write only */
 	// mmio //
-	u8 len_msg;
+	void __iomem *len_msg;
 	struct mem_region r5;
 	//// registers //
-	u8 status;
-	u8 interrupt_status;   /* read only */
+	void __iomem *status;
+	void __iomem *interrupt_status;   /* read only */
 	struct mem_region r4;
-	u8 interrupt_raise;    /* write only */
-	u8 interrupt_ack;      /* write only */
+	void __iomem *interrupt_raise;    /* write only */
+	void __iomem *interrupt_ack;      /* write only */
 	struct mem_region r3;
 	//// registers end //
-	u8 data_addr;
+	void __iomem *data_addr;
 	//// mmio end//
 	struct mem_region r2;
 	// dma //
-	u8 addr_op;
-	u8 dlen_msg;
+	void __iomem *addr_op;
+	void __iomem *dlen_msg;
 	//// registers //
-	u8 cmd;
+	void __iomem *cmd;
 	//// registers end //
 	// dma end //
 	struct mem_region r1;
@@ -72,40 +74,39 @@ struct config_mem {
 struct cryptodev_data {
 	struct cdev *cdev;
 	struct config_mem *configspace;
+	struct semaphore wsem;
+	wait_queue_head_t wq;
 };
 
 
 static dev_t devno;
 struct cryptodev_data mycryptodev;
 
-static bool is_not_live(void __iomem *live, u32 value)
-{
-	iowrite32(value, live);
-        if (ioread32(live) & value) {
-                return true;
-        }
-	return false;
-}
+static bool is_not_live(void __iomem *live, u32 value);
+static void setup_configspace(struct config_mem *configspace, ul size);
 
 static irqreturn_t pci_irq_handle(int irq, void *devid) 
 {
 	u32 status;
 	struct config_mem *space;
+	struct pci_dev *dev = (struct pci_dev *) devid;
 	pr_alert("pci_irq_handle: called\n");
-	if (!mycryptodev.configspace) {
+	if (!dev || dev->device != PCI_CryptoCard_DEVICE || !mycryptodev.configspace) {
 		return -EBUSY;
 	}
 	space = mycryptodev.configspace;
-	status = ioread32(space->start+space->interrupt_status);
+	status = ioread32(space->interrupt_status);
 	if (status == 0x001) {
 		pr_alert("pci_irq_handle: MMIO\n");
+		wake_up_interruptible(&mycryptodev.wq);
 	} else if (status == 0x100) {
 		pr_alert("pci_irq_handle: DMA\n");
-	}else {
-		iowrite32(status,  space->start+space->interrupt_ack);
+	} else {
+		iowrite32(status,  space->interrupt_ack);
 		return -EINVAL;
 	}
-	iowrite32(status,  space->start+space->interrupt_ack);
+	iowrite32(status,  space->interrupt_ack);
+	pr_alert("pci_irq_handle: handled!!\n");
 	return IRQ_HANDLED;
 }
 
@@ -170,6 +171,7 @@ static ssize_t pci_write(struct file *file, const char __user *ptr, size_t len, 
 {
         struct job *myjob;
 	struct config_mem *space;
+	ssize_t error;
 
 	if (!file->private_data || !mycryptodev.configspace)
                 return -ENOMEM;  /* struct job is not present*/
@@ -177,66 +179,85 @@ static ssize_t pci_write(struct file *file, const char __user *ptr, size_t len, 
 	space = mycryptodev.configspace;
 	
 	pr_alert("pci_write: write called!!!\n");
-	if (is_not_live(space->start+space->live, 0x0fffffff))
+	if (is_not_live(space->live, 0x0fffffff))
 		return -ENODEV;
         pr_alert("pci_write: liveliness check passed!!!\n");
 	
-	myjob->msg = (char *) kzalloc(len, GFP_KERNEL);	
+	myjob->msg = (char *) vmalloc(len); //kzalloc(len, GFP_KERNEL);	
 	if (!myjob->msg)
 		return -ENOMEM;
 	myjob->len = len;
-	if (copy_from_user(myjob->msg, (void *)ptr, myjob->len+1)) //remove 1
+	if (copy_from_user(myjob->msg, (void *)ptr, myjob->len)) { //remove 1
+		error = -EAGAIN;
 		goto out_free;
+	}
+	if (down_interruptible(&mycryptodev.wsem)) {
+		error = -ERESTARTSYS;
+		goto out_free;
+	}
 	if (myjob->isM) {
 		pr_alert("pci_write: MMIO operation!!!\n");
 		if (myjob->isI) {
 			pr_alert("pci_write: With Interrupt!!!\n");
 			if (myjob->isE) {
                                 pr_alert("pci_write: Encrypt!!!\n");
-                                iowrite32(0x80 | 0x00, space->start+space->status);
+                                iowrite32(0x80 | 0x00, space->status);
                         } else {
                                 pr_alert("pci_write: Decrypt!!!\n");
-                                iowrite32(0x80 | 0x02, space->start+space->status);
+                                iowrite32(0x80 | 0x02, space->status);
                         }
-			iowrite32(myjob->keyab, space->start+space->keys);
-                        iowrite32(myjob->len, space->start+space->len_msg);
-			memcpy_toio(space->start+space->r1.start, (void *) myjob->msg, myjob->len);
+			iowrite32(myjob->keyab, space->keys);
+                        iowrite32(myjob->len, space->len_msg);
+			memcpy_toio(space->r1.start, (void *) myjob->msg, myjob->len);
 			pr_alert("pci_write: Driver should put data address register and go to sleep!!\n");
-		/*tmp*/ pr_alert("pci_write: status: %x\n", ioread32(space->start+space->status));
-                /*tmp*/ pr_alert("pci_write: len_msg: %x\n", ioread32(space->start+space->len_msg));
-                        iowrite32(space->r1.start, space->start+space->data_addr);
+		/*tmp*/ pr_alert("pci_write: status: %x\n", ioread32(space->status));
+                /*tmp*/ pr_alert("pci_write: len_msg: %x\n", ioread32(space->len_msg));
+                        iowrite32(space->r1.start - space->start, space->data_addr);
+		/*tmp*/ pr_alert("pci_write: wait_event_interruptible: Just BEfore\n");
+			if (wait_event_interruptible(mycryptodev.wq, !(ioread8(space->status) & 0x01))) {
+				error = -ERESTARTSYS;
+				goto out_up;
+			}
+		/*tmp*/ pr_alert("pci_write: wait_event_interruptible: Just After\n");
 		} else {
 			pr_alert("pci_write: Without Interrupt!!!\n");
 			if (myjob->isE) {
 				pr_alert("pci_write: Encrypt!!!\n");
-				iowrite32(0x00 | 0x00, space->start+space->status);
+				iowrite32(0x00 | 0x00, space->status);
 			} else {
 				pr_alert("pci_write: Decrypt!!!\n");
-				iowrite32(0x00 | 0x02, space->start+space->status);
+				iowrite32(0x00 | 0x02, space->status);
 			}
-			iowrite32(myjob->keyab, space->start+space->keys);
-                        iowrite32(myjob->len, space->start+space->len_msg);
-                        memcpy_toio(space->start+space->r1.start, (void *) myjob->msg, myjob->len);
-                /*tmp*/ pr_alert("pci_write: status: %x\n", ioread32(space->start+space->status));
-                /*tmp*/ pr_alert("pci_write: len_msg: %x\n", ioread32(space->start+space->len_msg));
-                        iowrite32(space->r1.start, space->start+space->data_addr);
-                        while(ioread8(space->start+space->status) & 0x01) {
+			iowrite32(myjob->keyab, space->keys);
+                        iowrite32(myjob->len, space->len_msg);
+                        memcpy_toio(space->r1.start, (void *) myjob->msg, myjob->len);
+                /*tmp*/ pr_alert("pci_write: status: %x\n", ioread32(space->status));
+                /*tmp*/ pr_alert("pci_write: len_msg: %x\n", ioread32(space->len_msg));
+                        iowrite32(space->r1.start - space->start, space->data_addr);
+                /*tmp*/ pr_alert("pci_write: len_msg: %x\n", ioread32(space->len_msg));
+                        iowrite32(space->r1.start - space->start, space->data_addr);
+                        while(ioread8(space->status) & 0x01) {
                                 pr_alert("pci_write: looping!!!\n");
                         }
-                        memcpy_fromio((void *)myjob->msg, space->start+space->r1.start, myjob->len);
-                        if (copy_to_user((void *)ptr, myjob->msg, myjob->len))
-                                goto out_free;
+		}
+		memcpy_fromio((void *)myjob->msg, space->r1.start, myjob->len);
+                if (copy_to_user((void *)ptr, myjob->msg, myjob->len)) {
+			error = -EAGAIN;
+                	goto out_up;
 		}
 	}else {
 		pr_alert("pci_write: DMA operation!!!\n");
 	}
-	kfree(myjob->msg);
+	up(&mycryptodev.wsem);
+	vfree(myjob->msg);
 	myjob->msg = NULL;
 	return 0;
+out_up:
+	up(&mycryptodev.wsem);
 out_free:
-	kfree(myjob->msg);
+	vfree(myjob->msg);
 	myjob->msg = NULL;
-	return -EAGAIN;
+	return error;
 }
 
 static int pci_open(struct inode *inode, struct file *file)
@@ -265,37 +286,9 @@ static int pci_release (struct inode *inode, struct file *file)
         return 0;
 }
 
-static void setup_configspace(struct config_mem *configspace, ul size) {
-	configspace->id = 0x0;
-	configspace->live = 0x4;
-	configspace->keys = 0x8;
-	configspace->len_msg = 0xC;
-	configspace->status = 0x20;
-	configspace->interrupt_status = 0x24;
-	configspace->interrupt_raise = 0x60;
-        configspace->interrupt_ack = 0x64;
-	configspace->data_addr = 0x80;
-	configspace->addr_op = 0x90;
-	configspace->dlen_msg = 0x98;
-	configspace->cmd = 0xA0;
-	configspace->size = size;
-
-	configspace->r5.start = 0x10;
-	configspace->r5.end   = 0x1F;
-	configspace->r4.start = 0x28;
-        configspace->r4.end   = 0x5F;
-	configspace->r3.start = 0x68;
-        configspace->r3.end   = 0x7F;
-	configspace->r2.start = 0x88;
-        configspace->r2.end   = 0x8F;
-	configspace->r1.start = 0xA8;
-        configspace->r1.end   = 0xFFFFF;
-}
-
 const struct file_operations fops = {
 	.owner          = THIS_MODULE,
 	.open           = pci_open,
-//	.read           = pci_read,
 	.unlocked_ioctl = pci_unlocked_ioctl,
 	.write          = pci_write,
 	.release        = pci_release 
@@ -327,13 +320,13 @@ static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
                 goto out_unrequest;
 	setup_configspace(space, pci_resource_len(dev, 0));
 	pr_alert("cryptocard_probe: configspace start: %lx, size: %lx\n", (ul)space->start, space->size);
-	if (ioread32(space->start+space->id) != 0x010C5730) {
+	if (ioread32(space->id) != PCI_CryptoCard_IDFIER) {
 		pr_alert("cryptocard_probe: id match failed!!!\n"); 
 		goto out_iounmap;
 	}
 	pr_alert("cryptocard_probe: id matched!!!\n");
 
-	if (is_not_live(space->start+space->live, 0x0fffffff)) {
+	if (is_not_live(space->live, 0x0fffffff)) {
 		pr_alert("cryptocard_probe: liveliness check failed!!!\n");                              
                 goto out_iounmap;
 	}
@@ -343,7 +336,7 @@ static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		pr_alert("cryptocard_probe: request irq failed!!!\n");
 		goto out_iounmap;
 	}
-	pr_alert("cryptocard_probe: irq#%u\n", dev->irq);
+	pr_alert("cryptocard_probe: requested irq at: %u\n", dev->irq);
 
 	if (alloc_chrdev_region(&devno, 0, MAXDEVICE, PCI_CryptoCard_DRIVER)) {
 		pr_alert("cryptocard_probe: char device allocation failed!!!\n");
@@ -353,6 +346,9 @@ static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	
 	mycryptodev.cdev = cdev;
         mycryptodev.configspace = space;	
+	
+	init_waitqueue_head(&mycryptodev.wq);
+	sema_init(&mycryptodev.wsem, 1);
 
         cdev_init(cdev, &fops);
         if (cdev_add(cdev, devno, 1))
@@ -394,7 +390,47 @@ static void cryptocard_remove(struct pci_dev *dev)
 	pci_disable_device(dev);
 	kfree(mycryptodev.cdev);
         kfree(mycryptodev.configspace);
+	mycryptodev.configspace = NULL;
+	mycryptodev.cdev = NULL;
 }
+
+static bool is_not_live(void __iomem *live, u32 value)
+{       
+        iowrite32(value, live);
+        if (ioread32(live) & value) {
+                return true;
+        }
+        return false;
+}
+
+static void setup_configspace(struct config_mem *configspace, ul size) {
+	void __iomem *start = configspace->start;
+        configspace->id               = start + 0x0;
+        configspace->live             = start + 0x4;
+        configspace->keys             = start + 0x8;
+        configspace->len_msg          = start + 0xC;
+        configspace->status           = start + 0x20;
+        configspace->interrupt_status = start + 0x24;
+        configspace->interrupt_raise  = start + 0x60;
+        configspace->interrupt_ack    = start + 0x64;
+        configspace->data_addr        = start + 0x80;
+        configspace->addr_op          = start + 0x90;
+        configspace->dlen_msg         = start + 0x98;
+        configspace->cmd              = start + 0xA0;
+        configspace->size             = size;
+
+        configspace->r5.start = start + 0x10;
+        configspace->r5.end   = start + 0x1F;
+        configspace->r4.start = start + 0x28;
+        configspace->r4.end   = start + 0x5F;
+        configspace->r3.start = start + 0x68;
+        configspace->r3.end   = start + 0x7F;
+        configspace->r2.start = start + 0x88;
+        configspace->r2.end   = start + 0x8F;
+        configspace->r1.start = start + 0xA8;
+        configspace->r1.end   = start + 0xFFFFF;
+}
+
 
 /**
  * PCI_DEVICE(vend, dev) - macro used to describe a specific PCI device
@@ -436,12 +472,3 @@ MODULE_DEVICE_TABLE(pci, cryptocard_ids);
 
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("CryptoCard Device Driver module");
-MODULE_AUTHOR("Vishal Chourasia");
-#include <linux/module.h>
-#include <linux/pci.h>
-#include <linux/cdev.h>
-#include <linux/uaccess.h>
-#include <linux/ioctl.h>
-
-#define INTERRUPT 10

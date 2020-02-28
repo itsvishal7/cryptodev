@@ -8,6 +8,8 @@
 #define SET_CONFIG _IOW(248,102,uint8_t*)
 #define SET_ENCRYP _IOW(248,103,uint8_t*)
 
+#define BUFFERSIZE 32768
+
 /*Function template to create handle for the CryptoCard device.
 On success it returns the device handle as an integer*/
 DEV_HANDLE create_handle()
@@ -42,8 +44,16 @@ int encrypt(DEV_HANDLE cdev, ADDR_PTR addr, uint64_t length, uint8_t isMapped)
 	value = 50;
 	if (ioctl(cdev, SET_ENCRYP, &value))
                 return ERROR;
-	write(cdev, addr, length);
-  return ERROR;
+	uint64_t count = 0;
+	do {
+		count =  length > BUFFERSIZE ? BUFFERSIZE : length;
+		length = length > BUFFERSIZE ? length-BUFFERSIZE: 0;
+		if (write(cdev, addr, count)) {
+			return ERROR;
+		}
+		addr += count;
+	} while(length>0);
+	return length;
 }
 
 /*Function template to decrypt a message using MMIO/DMA/Memory-mapped.
@@ -59,8 +69,16 @@ int decrypt(DEV_HANDLE cdev, ADDR_PTR addr, uint64_t length, uint8_t isMapped)
         value = 60;
         if (ioctl(cdev, SET_ENCRYP, &value))
                 return ERROR;
-	write(cdev, addr, length);
-  return ERROR;
+	uint64_t count = 0;
+        do {    
+                count =  length > BUFFERSIZE ? BUFFERSIZE : length;
+                length = length > BUFFERSIZE ? length-BUFFERSIZE: 0;
+                if (write(cdev, addr, count)) {
+                        return ERROR;
+                }
+                addr += count;
+        } while(length>0);
+        return length;
 }
 
 /*Function template to set the key pair.
