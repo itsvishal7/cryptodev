@@ -7,6 +7,7 @@
 #define SET_KEY___ _IOW(248,101,uint32_t*)
 #define SET_CONFIG _IOW(248,102,uint8_t*)
 #define SET_ENCRYP _IOW(248,103,uint8_t*)
+#define SET_MMAP__ _IOW(248,104,uint8_t*)
 
 #define BUFFERSIZE 32768
 
