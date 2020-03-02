@@ -23,18 +23,25 @@ int main(int argc, char *argv[])
     exit(0);
   }
 	printf("set_key successfull, size of text: %lu\n", size);
-	set_config(cdev, DMA, SET);
-//	set_config(cdev, DMA, UNSET);
+//	set_config(cdev, DMA, SET);
+	set_config(cdev, DMA, UNSET);
 	set_config(cdev, INTERRUPT, SET);
 //	set_config(cdev, INTERRUPT, UNSET);
 	
 
-  encrypt(cdev, op_text, size, 0);
-  printf("Encrypted Text: %s\n", op_text);
+  ADDR_PTR addr = map_card(cdev, size);
+	printf("Original Text: %s\n", msg);
+	if (!addr) {
+		printf("mmapp faild\n");
+		exit(1);
+	}
+	strncpy((char*)addr, msg, size+1);
+  encrypt(cdev, addr, size, 1);
+  printf("Encrypted Text: %s\n", (char *)addr);
 
-  decrypt(cdev, op_text, size, 0);
-  printf("Decrypted Text: %s\n", op_text);
-
+  decrypt(cdev, addr, size, 1);
+  printf("Decrypted Text: %s\n", (char *)addr);
+	unmap_card(cdev, addr);
   close_handle(cdev);
   return 0;
 }

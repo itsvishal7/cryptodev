@@ -13,12 +13,15 @@
 #define DMA 40
 #define ENCRYPT 50
 #define DECRYPT 60
+#define MMAP 70
+#define UNMMAP 80
 
 #define BUFFERSIZE 32768
 
 #define SET_KEY___ _IOW(248,101,uint32_t*)
 #define SET_CONFIG _IOW(248,102,uint8_t*)
 #define SET_ENCRYP _IOW(248,103,uint8_t*)
+#define SET_MMAP__ _IOW(248,104,uint8_t*)
 
 #define ui unsigned int
 #define ul unsigned long
@@ -34,6 +37,7 @@ struct job {
 	bool isE;          // isEncrypt or Decrypt
 	bool isM;          // isMMIO or DMA
 	bool isI;          // isInterruptable or Not
+	bool isNotMM;      // isMemoryMapped or Not
 	ui   len;          // length of the buffer
 	void *msg;	   // buffer
 	u32  keyab;
@@ -92,6 +96,7 @@ static bool is_not_live(void __iomem *live, u32 value);
 static void setup_configspace(struct config_mem *configspace, ul size);
 
 /** char dev file operations function */ 
+static int pci_mmap (struct file *file, struct vm_area_struct *vmas);
 static irqreturn_t pci_irq_handle(int irq, void *devid);
 static long pci_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 static ssize_t pci_write(struct file *file, const char __user *ptr, size_t len, loff_t *offset);
@@ -103,7 +108,8 @@ const struct file_operations fops = {
 	.open           = pci_open,
 	.unlocked_ioctl = pci_unlocked_ioctl,
 	.write          = pci_write,
-	.release        = pci_release 
+	.release        = pci_release,
+	.mmap		= pci_mmap
 };
 
 static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
@@ -111,7 +117,7 @@ static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	struct config_mem *space;
 	struct cdev *cdev;
 
-	pr_alert("cryptocard_probe: probe method called!!!\n");
+	//pr_alert("cryptocard_probe: 1) Set up device...started\n");
 	
 	space = kzalloc(sizeof(struct config_mem), GFP_KERNEL);
 	if (unlikely(!space))
@@ -124,44 +130,43 @@ static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
 	if (unlikely(pci_enable_device(dev)))
         	goto out_err;
-	pr_alert("cryptocard_probe: enabled device!!!\n");
+	//pr_alert("cryptocard_probe: 2) Enabled device\n");
 	if (unlikely(pci_request_regions(dev, PCI_CryptoCard_DRIVER)))
 		goto out_disable;
-	pr_alert("cryptocard_probe: requested regions!!!\n");
+	//pr_alert("cryptocard_probe: 3) Requested regions\n");
 	space->start = pci_ioremap_bar(dev, 0);
 	if (unlikely(!space->start))
                 goto out_unrequest;
 	setup_configspace(space, pci_resource_len(dev, 0));
-	pr_alert("cryptocard_probe: configspace start: %lx, size: %lx\n", (ul)space->start, space->size);
 	if (unlikely(ioread32(space->id) != PCI_CryptoCard_IDFIER)) {
-		pr_alert("cryptocard_probe: id match failed!!!\n"); 
+		//pr_alert("cryptocard_probe: error: id match failed\n"); 
 		goto out_iounmap;
 	}
-	pr_alert("cryptocard_probe: id matched!!!\n");
+	//pr_alert("cryptocard_probe: 4) ID matched!!!\n");
 
 	if (unlikely(is_not_live(space->live, 0x0fffffff))) {
-		pr_alert("cryptocard_probe: liveliness check failed!!!\n");                              
+		//pr_alert("cryptocard_probe: error: device not live\n");                              
                 goto out_iounmap;
 	}
-	pr_alert("cryptocard_probe: liveliness check passed!!!\n");
+	//pr_alert("cryptocard_probe: 5) Device is live.\n");
 	
 	if (!dma_set_mask(&dev->dev, DMA_BIT_MASK(32))) {
-		pr_alert("cryptocard_probe: dma_set_mask successfull!!!\n");
+		//pr_alert("cryptocard_probe: 6) dma_set_mask successfull!!!\n");
 	}else {
-		pr_alert("cryptocard_probe: dma_set_mask failed!!!\n");
+		//pr_alert("cryptocard_probe: @error: dma_set_mask failed!!!\n");
 	}
 
 	if (unlikely(request_irq(dev->irq, pci_irq_handle, IRQF_SHARED, PCI_CryptoCard_DRIVER, dev))) {
-		pr_alert("cryptocard_probe: request irq failed!!!\n");
+		//pr_alert("cryptocard_probe: error: request irq failed!!!\n");
 		goto out_iounmap;
 	}
-	pr_alert("cryptocard_probe: requested irq at: %u\n", dev->irq);
+	//pr_alert("cryptocard_probe: 7) IRQ at: %u\n", dev->irq);
 
 	if (unlikely(alloc_chrdev_region(&devno, 0, MAXDEVICE, PCI_CryptoCard_DRIVER))) {
-		pr_alert("cryptocard_probe: char device allocation failed!!!\n");
+		//pr_alert("cryptocard_probe: error: char device allocation failed!!!\n");
                 goto out_irqfree;
 	}
-        pr_alert("cryptocard_probe: char device region allocated, major number: %d \n", MAJOR(devno));
+        //pr_alert("cryptocard_probe: 8) char device region allocated, major number: %d, minor #: %d \n", MAJOR(devno), MINOR(devno));
 	
 	mycryptodev.cdev = cdev;
         mycryptodev.configspace = space;	
@@ -173,30 +178,30 @@ static int cryptocard_probe(struct pci_dev *dev, const struct pci_device_id *id)
         cdev_init(cdev, &fops);
         if (unlikely(cdev_add(cdev, devno, 1)))
 		goto out_chrdev_unreg_region;
-	pr_alert("cryptocard_probe: char device added!!!\n");
+	//pr_alert("cryptocard_probe: 9) Char device added!!!\n");
 
 	return 0;
 
 out_chrdev_unreg_region:
-	pr_alert("cryptocard_probe: out_chrdev_unreg_region: cdev_add failed!!!\n");
-	unregister_chrdev_region(devno, MAXDEVICE);
+	//pr_alert("cryptocard_probe: out_chrdev_unreg_region: cdev_add failed!!!\n");
 	mycryptodev.cdev = NULL;
         mycryptodev.configspace = NULL;
 	mycryptodev.pdev = NULL;
+	unregister_chrdev_region(devno, MAXDEVICE);
 out_irqfree:
-	pr_alert("cryptocard_probe: out_irqfree: something failed after request irq!!!\n");
+	//pr_alert("cryptocard_probe: out_irqfree: something failed after request irq!!!\n");
 	free_irq(dev->irq, dev);
 out_iounmap:
-	pr_alert("cryptocard_probe: out_iounmap: something failed after iomapping !!!\n");
+	//pr_alert("cryptocard_probe: out_iounmap: something failed after iomapping !!!\n");
 	iounmap(space->start);
 out_unrequest:
-	pr_alert("cryptocard_probe: out_unrequest: pci_ioremap_bar failed!!!\n");
+	//pr_alert("cryptocard_probe: out_unrequest: pci_ioremap_bar failed!!!\n");
 	pci_release_regions(dev);
 out_disable:
-	pr_alert("cryptocard_probe: out_disable: pci_request_regions failed!!!\n");
+	//pr_alert("cryptocard_probe: out_disable: pci_request_regions failed!!!\n");
 	pci_disable_device(dev);
 out_err:
-	pr_alert("cryptocard_probe: out_err: char device alloc failed!!!\n");
+	//pr_alert("cryptocard_probe: out_err: char device alloc failed!!!\n");
 	kfree(cdev);
 	kfree(space);
 	return -ENODEV;
@@ -204,7 +209,7 @@ out_err:
 
 static void cryptocard_remove(struct pci_dev *dev)
 {
-        pr_alert("cryptocard_remove: remove method called!!!\n");
+        //pr_alert("cryptocard_remove: called!!!\n");
         cdev_del(mycryptodev.cdev);
         unregister_chrdev_region(devno, MAXDEVICE);
         free_irq(dev->irq, dev);
@@ -213,8 +218,24 @@ static void cryptocard_remove(struct pci_dev *dev)
         pci_disable_device(dev);
         kfree(mycryptodev.cdev);
         kfree(mycryptodev.configspace);
-        mycryptodev.configspace = NULL;
+	mycryptodev.configspace = NULL;
         mycryptodev.cdev = NULL;
+        mycryptodev.pdev = NULL;
+	//pr_alert("cryptocard_remove: success!!!\n");
+}
+
+static int pci_mmap (struct file *file, struct vm_area_struct *vmas)
+{
+	if (!mycryptodev.pdev) 
+		return -EBUSY;
+	vmas->vm_page_prot = pgprot_device(vmas->vm_page_prot);
+	vmas->vm_pgoff += (pci_resource_start(mycryptodev.pdev, 0) >> PAGE_SHIFT);
+	if (unlikely(io_remap_pfn_range(vmas, vmas->vm_start, vmas->vm_pgoff, vmas->vm_end - vmas->vm_start, vmas->vm_page_prot))) {
+		//pr_alert("pci_mmap: remap_pfn_range failed!!!\n");
+		return -EAGAIN;
+	}
+	//pr_alert("pci_mmap: remap_pfn_range mapped!!!\n");
+	return 0;
 }
 
 static irqreturn_t pci_irq_handle(int irq, void *devid) 
@@ -222,25 +243,24 @@ static irqreturn_t pci_irq_handle(int irq, void *devid)
 	u32 status;
 	struct config_mem *space;
 	struct pci_dev *dev = (struct pci_dev *) devid;
-	pr_alert("pci_irq_handle: called\n");
+	//pr_alert("pci_irq_handle: called\n");
 	if (unlikely(!dev || dev->device != PCI_CryptoCard_DEVICE || !mycryptodev.configspace)) {
 		return -EBUSY;
 	}
 	space = mycryptodev.configspace;
 	status = ioread32(space->interrupt_status);
 	if (status == 0x001) {
-		pr_alert("pci_irq_handle: MMIO\n");
+		//pr_alert("pci_irq_handle: MMIO\n");
 		wake_up_interruptible(&mycryptodev.wq);
 	} else if (status == 0x100) {
-		pr_alert("pci_irq_handle: DMA\n");
-		writeq(0x0, space->cmd);
+		//pr_alert("pci_irq_handle: DMA\n");
 		wake_up_interruptible(&mycryptodev.wq);
 	} else {
 		iowrite32(status,  space->interrupt_ack);
 		return -EINVAL;
 	}
 	iowrite32(status,  space->interrupt_ack);
-	pr_alert("pci_irq_handle: handled!!\n");
+	//pr_alert("pci_irq_handle: handled!!\n");
 	return IRQ_HANDLED;
 }
 
@@ -248,7 +268,6 @@ static long pci_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned lon
 {	
 	struct job *myjob;
 	uint8_t myval;
-	pr_alert("pci_unlocked_ioctl: called!!!\n");
 
 	if (unlikely(!file->private_data))
 		return -ENOMEM;  /* struct job is not present*/
@@ -256,14 +275,14 @@ static long pci_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned lon
 
 	switch (cmd) {
 	case SET_KEY___:
-		pr_alert("set_key: called!!!\n");
+		//pr_alert("set_key: called!!!\n");
 		if (unlikely(copy_from_user(&myjob->keyab, (void *)arg, 4))) {
 			return -EAGAIN;
 		}
-		pr_alert("set_key: success!!!\n");
+		//pr_alert("set_key: success!!!\n");
 		break;
 	case SET_CONFIG:
-		pr_alert("set_config: called!!!\n");
+		//pr_alert("set_config: called!!!\n");
 		if (unlikely(copy_from_user(&myval, (void *)arg, 1))) {
                         return -EAGAIN;
                 }	
@@ -278,10 +297,10 @@ static long pci_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned lon
                 }else {
 			return -EINVAL;
 		}
-		pr_alert("set_config: success!!!\n");
+		//pr_alert("set_config: success!!!\n");
 		break;
 	case SET_ENCRYP:
-		pr_alert("set_encrypt: called!!!\n");
+		//pr_alert("set_encrypt: called!!!\n");
                 if (unlikely(copy_from_user(&myval, (void *)arg, 1))) {
                         return -EAGAIN;
                 }
@@ -292,12 +311,25 @@ static long pci_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned lon
                 }else {
                         return -EINVAL;
                 }
-                pr_alert("set_encrypt: success!!!\n");
+                //pr_alert("set_encrypt: success!!!\n");
+                break;
+	case SET_MMAP__:
+		//pr_alert("set_mmap__: called!!!\n");
+                if (unlikely(copy_from_user(&myval, (void *)arg, 1))) {
+                        return -EAGAIN;
+                }
+                if (myval == MMAP) {
+                        myjob->isNotMM = false;
+                } else if (myval == UNMMAP) {
+                        myjob->isNotMM = true;
+                }else {
+                        return -EINVAL;
+                }
+                //pr_alert("set_mmap__: success!!!\n");
                 break;
 	default:
 		return -EINVAL; 
 	}
-	pr_alert("pci_unlocked_ioctl: success!!!\n");
         return 0;
 }
 
@@ -305,146 +337,158 @@ static ssize_t pci_write(struct file *file, const char __user *ptr, size_t len, 
 {
         struct job *myjob;
 	struct config_mem *space;
-	ssize_t error;
+	ssize_t err;
+	dma_addr_t dma_handle;
+	err = -1;
 
 	if (unlikely(!file->private_data || !mycryptodev.configspace))
                 return -ENOMEM;  /* struct job is not present*/
         myjob = (struct job *) file->private_data;
 	space = mycryptodev.configspace;
 	
-	pr_alert("pci_write: write called!!!\n");
-	if (unlikely(is_not_live(space->live, 0x0fffffff)))
-		return -ENODEV;
-        pr_alert("pci_write: liveliness check passed!!!\n");
+	if (unlikely(!myjob->isNotMM && !myjob->isM)) {
+		//pr_alert("pci_write: Trying to DMA with MMAPED pointer. NOT ALLOWED!!\n");
+		return -EINVAL;
+	}
 	
-	myjob->msg = vmalloc(len); //kzalloc(len, GFP_KERNEL);	
-	if (unlikely(!myjob->msg))
-		return -ENOMEM;
+	//pr_alert("pci_write: write called!!!\n");
+	if (unlikely(is_not_live(space->live, 0x0fffffff))) {
+		//pr_alert("pci_write: device is not live\n");
+		return -ENODEV;
+	}
+        //pr_alert("pci_write: device is live!!!\n");
+	
 	myjob->len = len;
-	if (unlikely(copy_from_user(myjob->msg, (void *)ptr, myjob->len))) { //remove 1
-		error = -EAGAIN;
+	if (myjob->isNotMM) {
+		//pr_alert("pci_wrtie: isNotMM: True\n");
+		myjob->msg = vmalloc(len);                                                             /* Only if isNotMM is true */
+		if (unlikely(!myjob->msg))
+                	return -ENOMEM;	
+
+		if (unlikely(copy_from_user(myjob->msg, (void *)ptr, myjob->len))) {
+			err = -EAGAIN;
+			goto out_free;
+		}
+	}
+
+	if (down_interruptible(&mycryptodev.wsem)) {
+		err = -ERESTARTSYS;
 		goto out_free;
 	}
-	if (unlikely(down_interruptible(&mycryptodev.wsem))) {
-		error = -ERESTARTSYS;
-		goto out_free;
-	}
+
 	iowrite32(myjob->keyab, space->keys);								/* setting keys */
 	if (myjob->isM) {										/* MMIO */
-		pr_alert("pci_write: MMIO operation!!!\n");
+		//pr_alert("pci_write: MMIO operation!!!\n");
 		iowrite32(myjob->len, space->len_msg);
-		memcpy_toio(space->r1.start, myjob->msg, myjob->len);
+		if (myjob->isNotMM) {
+			memcpy_toio(space->r1.start, myjob->msg, myjob->len);
+		}
 		if (myjob->isI) {					
-			pr_alert("pci_write: With___ Interrupt!!!\n");
+			//pr_alert("pci_write: With___ Interrupt!!!\n");
 			if (myjob->isE) {
-                                pr_alert("pci_write: Encrypt!!!\n");
+                                //pr_alert("pci_write: Encrypt!!!\n");
                                 iowrite32(0x80 | 0x00, space->status);
                         } else {
-                                pr_alert("pci_write: Decrypt!!!\n");
+                                //pr_alert("pci_write: Decrypt!!!\n");
                                 iowrite32(0x80 | 0x02, space->status);
                         }
-		/*tmp*/ pr_alert("pci_write: status: %x\n", ioread32(space->status));
-                /*tmp*/ pr_alert("pci_write: len_msg: %x\n", ioread32(space->len_msg));
-                        writeq(space->r1.start - space->start, space->data_addr);
-		/*tmp*/ pr_alert("pci_write: wait_event_interruptible: Just BEfore\n");
-			if (wait_event_interruptible(mycryptodev.wq, !(ioread8(space->status) & 0x01))) {
-				error = -ERESTARTSYS;
+			writeq(space->r1.start - space->start, space->data_addr);
+		        //pr_alert("pci_write: wait_event_interruptible: Just BEfore\n");
+			if (unlikely(wait_event_interruptible(mycryptodev.wq, !(ioread8(space->status) & 0x01)))) {
+				err = -ERESTARTSYS;
 				goto out_up;
 			}
-		/*tmp*/ pr_alert("pci_write: wait_event_interruptible: Just After\n");
+			//pr_alert("pci_write: wait_event_interruptible: Just After\n");
 		} else {
-			pr_alert("pci_write: Without Interrupt!!!\n");
+			//pr_alert("pci_write: Without Interrupt!!!\n");
 			if (myjob->isE) {
-				pr_alert("pci_write: Encrypt!!!\n");
+				//pr_alert("pci_write: Encrypt!!!\n");
 				iowrite32(0x00 | 0x00, space->status);
 			} else {
-				pr_alert("pci_write: Decrypt!!!\n");
+				//pr_alert("pci_write: Decrypt!!!\n");
 				iowrite32(0x00 | 0x02, space->status);
 			}
-                /*tmp*/ pr_alert("pci_write: status: %x\n", ioread32(space->status));
-                /*tmp*/ pr_alert("pci_write: len_msg: %x\n", ioread32(space->len_msg));
                         writeq(space->r1.start - space->start, space->data_addr);
-                        while(ioread8(space->status) & 0x01) {
-                                pr_alert("pci_write: looping!!!\n");
-                        }
+                        while(ioread8(space->status) & 0x01); 							/* busy waiting */
+                	//pr_alert("pci_write: loop ended!!!\n");
 		}
-		memcpy_fromio(myjob->msg, space->r1.start, myjob->len);
-                if (copy_to_user((void *)ptr, myjob->msg, myjob->len)) {
-			error = -EAGAIN;
-                	goto out_up;
+		if (myjob->isNotMM) {
+			memcpy_fromio(myjob->msg, space->r1.start, myjob->len);
+                	if (unlikely(copy_to_user((void *)ptr, myjob->msg, myjob->len))) {
+				err = -EAGAIN;
+                		goto out_up;
+			}
 		}
 	}else {
-		pr_alert("pci_write: DMA operation!!!\n");
-		dma_addr_t dma_handle;
+		//pr_alert("pci_write: DMA operation!!!\n");
+		
 		dma_handle = dma_map_single(&mycryptodev.pdev->dev, myjob->msg, myjob->len, DMA_BIDIRECTIONAL);
-		if (dma_mapping_error(&mycryptodev.pdev->dev, dma_handle)) {
-			pr_alert("pci_write: dma_map_single failed!!!\n");
+		if (unlikely(dma_mapping_error(&mycryptodev.pdev->dev, dma_handle))) {
+			//pr_alert("pci_write: dma_map_single failed!!!\n");
 			goto out_up;
 		}
-		pr_alert("pci_write: dma addr: %lx\n", (unsigned long) dma_handle);
+		//pr_alert("pci_write: dma_handle: %lx\n", (unsigned long) dma_handle);
 	
 		writeq(dma_handle, space->addr_op);
-		pr_alert("pci_write: DMA Data address: %lx\n", (unsigned long)readq(space->addr_op));
+		//pr_alert("pci_write: dma_data_address: %lx (check)\n", (unsigned long)readq(space->addr_op));
 		
 		writeq(myjob->len, space->dlen_msg);
-                pr_alert("pci_write: DMA length: %llu\n", readq(space->dlen_msg));	
+                //pr_alert("pci_write: DMA length: %llu\n", readq(space->dlen_msg));
 		
 		if (myjob->isI) {
-			pr_alert("pci_write: With___ Interrupt!!!\n");
+			//pr_alert("pci_write: With___ Interrupt!!!\n");
 			if (myjob->isE) {
-                                pr_alert("pci_write: Encrypt!!!\n");
-                                writeq(0x5, space->cmd);
+                                //pr_alert("pci_write: Encrypt!!!\n");
+                                writeq(0x4 | 0x0 | 0x1, space->cmd);
                         } else {
-                                pr_alert("pci_write: Decrypt!!!\n");
-                                writeq(0x7, space->cmd);
+                                //pr_alert("pci_write: Decrypt!!!\n");
+                                writeq(0x4 | 0x2 | 0x1, space->cmd);
                         }
-                        pr_alert("pci_write: DMA cmd: %llx\n", readq(space->cmd));
-		/*tmp*/	pr_alert("pci_write: wait_event_interruptible: Just BEfore\n");
-		/*tmp*/ pr_alert("pci_write: status: %x\n", ioread32(space->status));
-			u32 wait = wait_event_interruptible(mycryptodev.wq, !(readq(space->cmd) & 0x1));
-			pr_alert("pci_write: wait: %u\n", wait);
-			if (wait) {
-                                error = -ERESTARTSYS;
+			//pr_alert("pci_write: wait_event_interruptible: Just BEfore\n");
+			if (unlikely(wait_event_interruptible(mycryptodev.wq, !(readq(space->cmd) & 0x1)))) {
+                                err = -ERESTARTSYS;
                                 goto out_up;
                         }
-                /*tmp*/ pr_alert("pci_write: wait_event_interruptible: Just After\n");
+                	//pr_alert("pci_write: wait_event_interruptible: Just After\n");
 		} else {
-			pr_alert("pci_write: Without Interrupt!!!\n");	
+			//pr_alert("pci_write: Without Interrupt!!!\n");	
 			if (myjob->isE) {
-				pr_alert("pci_write: Encrypt!!!\n");	
-				writeq(0x1, space->cmd);
+				//pr_alert("pci_write: Encrypt!!!\n");	
+				writeq(0x0 | 0x0 | 0x1, space->cmd);
 			} else {
-				pr_alert("pci_write: Decrypt!!!\n");
-				writeq(0x3, space->cmd);
+				//pr_alert("pci_write: Decrypt!!!\n");
+				writeq(0x0 | 0x2 | 0x1, space->cmd);
 			}
-			pr_alert("pci_write: DMA cmd: %llx\n", readq(space->cmd));
-
-                	while(ioread8(space->status) & 0x01) {
-                        	pr_alert("pci_write: MMlooping!!!\n");
-                	}
+			//pr_alert("pci_write: DMA cmd: %llx(check)\n", readq(space->cmd));
+                	while(readq(space->cmd) & 0x1);              			/* busy waiting */
+			//pr_alert("pci_write: dma looping completes \n");
 		}
 		dma_unmap_single(&mycryptodev.pdev->dev, dma_handle, myjob->len, DMA_BIDIRECTIONAL);
-		if (copy_to_user((void *)ptr, myjob->msg, myjob->len)) {
-                	error = -EAGAIN;
+		if (unlikely(copy_to_user((void *)ptr, myjob->msg, myjob->len))) {
+                	err = -EAGAIN;
                 	goto out_up;
                 }
 	}
 	up(&mycryptodev.wsem);
-	vfree(myjob->msg);
+	if (myjob->isNotMM) {
+                vfree(myjob->msg);
+        }
 	myjob->msg = NULL;
 	return 0;
 out_up:
 	up(&mycryptodev.wsem);
 out_free:
-	vfree(myjob->msg);
+	if (myjob->isNotMM) {
+		vfree(myjob->msg);
+	}
 	myjob->msg = NULL;
-	return error;
+	return err;
 }
 
 static int pci_open(struct inode *inode, struct file *file)
 {	
 	struct job *myjob;
-	pr_alert("pci_open: called!!!\n");
+	//pr_alert("pci_open: called!!!\n");
 	myjob = kzalloc(sizeof(struct job), GFP_KERNEL);
 	if (unlikely(!myjob)) { 
 		return -ENOMEM;
@@ -454,16 +498,16 @@ static int pci_open(struct inode *inode, struct file *file)
 	myjob->isI = false;
 	myjob->keyab = 0;
 	file->private_data = myjob;
-	pr_alert("pci_open: success!!!\n");
+	//pr_alert("pci_open: success!!!\n");
 	return 0;
 }
 
 static int pci_release (struct inode *inode, struct file *file)
 {	
-	pr_info("pci_release: called!!!\n");
+	//pr_info("pci_release: called!!!\n");
 	kfree(file->private_data);
 	file->private_data = NULL;
-	pr_info("pci_release: success!!!\n");
+	//pr_info("pci_release: success!!!\n");
         return 0;
 }
 

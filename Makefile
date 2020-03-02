@@ -7,6 +7,8 @@ TEST_SRC=test-cases
 INC=include
 LIB_OBJ=lib
 OBJ=obj
+BENCH_SRC=bechmark-test
+BENCH_OBJ=bech-obj
 
 
 # src = $(wildcard Examples/*.c)
@@ -15,13 +17,48 @@ OBJ=obj
 
 HDRS=$(shell ls $(INC)/*.h)
 
-all: test1 # library #examples
+all: test1 test2 test3 test4 test5 create-dev bench# library #examples
+
+bench: dma dma_interrupt mmap mmap_interrupt mmio mmio_interrupt
+
+create-dev: $(BENCH_SRC)/file_create.c
+	$(CC) -o $@ $<
 
 test1: $(OBJ)/test1.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+test2: $(OBJ)/test2.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+test3: $(OBJ)/test3.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+test4: $(OBJ)/test4.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+test5: $(OBJ)/test5.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+
+dma: $(BENCH_OBJ)/dma.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+
+dma_interrupt: $(BENCH_OBJ)/dma_interrupt.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+
+mmap: $(BENCH_OBJ)/mmap.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+
+mmap_interrupt: $(BENCH_OBJ)/mmap_interrupt.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+
+mmio: $(BENCH_OBJ)/mmio.o $(LIB)/libcrypter.so
+	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
+
+mmio_interrupt: $(BENCH_OBJ)/mmio_interrupt.o $(LIB)/libcrypter.so
 	$(CC) -o $@ -I$(INC) $< -L$(LIB) -lcrypter
 
 $(OBJ)/%.o: $(TEST_SRC)/%.c $(HDRS)
 	mkdir -p obj
+	$(CC) -c -I$(INC) $< -o $@
+
+$(BENCH_OBJ)/%.o: $(BENCH_SRC)/%.c $(HDRS)
+	mkdir -p bech-obj
 	$(CC) -c -I$(INC) $< -o $@
 
 library: $(LIB)/libcrypter.so
@@ -41,4 +78,4 @@ prepare-submit: $(RNO)-pa-cs730.tar.gz
 
 .PHONY: clean
 clean:
-	rm -rf test1 $(OBJ) $(LIB)
+	rm -rf test1 test2 test3 test4 test5 create-dev dma dma_interrupt mmap mmap_interrupt mmio mmio_interrupt $(OBJ) $(LIB) $(BENCH_OBJ)
